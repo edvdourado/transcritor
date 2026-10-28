@@ -1,0 +1,59 @@
+# Exemplo final; emitir certificado ANTES de habilitar o bloco 443.
+# Substituir transcritor.example.com em todo o arquivo.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name transcritor.example.com;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/letsencrypt;
+        auth_basic off;
+        try_files $uri =404;
+    }
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name transcritor.example.com;
+    ssl_certificate /etc/letsencrypt/live/transcritor.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/transcritor.example.com/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    root /opt/transcritor/current/frontend/dist;
+    index index.html;
+    server_tokens off;
+    auth_basic "Transcritor";
+    auth_basic_user_file /etc/nginx/transcritor.htpasswd;
+    client_max_body_size 51m;
+    client_body_timeout 120s;
+    add_header Cache-Control "no-store" always;
+    add_header X-Content-Type-Options "nosniff" always;
+
+    location /api/ {
+        # Sem barra final no proxy_pass: preserva /api/v1/...
+        proxy_pass http://127.0.0.1:8765;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        # API não usa Basic; evitar encaminhar a credencial ao backend.
+        proxy_set_header Authorization "";
+        proxy_request_buffering off;
+        proxy_buffering off;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 180s;
+        proxy_send_timeout 180s;
+    }
+
+    location ~ /\. {
+        deny all;
+    }
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}

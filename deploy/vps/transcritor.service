@@ -1,0 +1,28 @@
+# Exemplo para systemd no Ubuntu 22.04. Instalar em /etc/systemd/system/transcritor.service.
+[Unit]
+Description=Transcritor API
+After=network.target
+RequiresMountsFor=/opt/transcritor /opt/whisper.cpp /var/lib/transcritor
+
+[Service]
+Type=simple
+User=transcritor
+Group=transcritor
+WorkingDirectory=/opt/transcritor/current
+EnvironmentFile=/etc/transcritor.env
+Environment=PYTHONUNBUFFERED=1
+StateDirectory=transcritor
+StateDirectoryMode=0700
+ExecStart=/opt/transcritor/current/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8765 --workers 1
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/transcritor
+
+[Install]
+WantedBy=multi-user.target
