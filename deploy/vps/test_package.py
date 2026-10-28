@@ -1,5 +1,8 @@
 import hashlib
 import os
+import shutil
+import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -9,6 +12,37 @@ from package import FILES, package
 
 
 class PackageTest(unittest.TestCase):
+    def test_review_checks_snapshot_imports_and_refuses_production_port(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / 'snapshot' / 'app'
+            source = Path(__file__).resolve().parents[2]
+            shutil.copytree(source / 'backend/app', root / 'backend/app',
+                            ignore=shutil.ignore_patterns('__pycache__'))
+            script = root / 'deploy/vps/review.py'
+            script.parent.mkdir(parents=True)
+            shutil.copyfile(source / 'deploy/vps/review.py', script)
+            runtime = root.parent / 'run/tmp'
+            runtime.mkdir(parents=True)
+            model = root.parent / 'existing-model.bin'
+            model.write_bytes(b'not a real model: --check never loads it')
+            poison = Path(directory) / 'production'
+            (poison / 'app').mkdir(parents=True)
+            (poison / 'app/__init__.py').write_text("raise RuntimeError('Production imported')")
+            env = dict(os.environ, PYTHONPATH=str(poison), TRANSCRITOR_ENGINE='whisper',
+                       TRANSCRITOR_HOST='127.0.0.1', TRANSCRITOR_PORT='8766',
+                       TRANSCRITOR_TEMP_DIR=str(runtime), WHISPER_CLI_PATH=sys.executable,
+                       FFMPEG_PATH=sys.executable, FFPROBE_PATH=sys.executable,
+                       WHISPER_MODEL_SMALL=str(model), WHISPER_MODEL_MEDIUM=str(model))
+            command = [sys.executable, '-I', '-B', str(script), '--check']
+            result = subprocess.run(command, cwd=poison, env=env, capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(f'IMPORT app.main: {root / "backend/app/main.py"}', result.stdout)
+            self.assertIn(f'tmp={runtime}', result.stdout)
+            env['TRANSCRITOR_PORT'] = '8765'
+            result = subprocess.run(command, cwd=poison, env=env, capture_output=True, text=True, timeout=20)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('Expected Whisper on 127.0.0.1:8766', result.stderr)
+
     def test_snapshot_exclusions_integrity_and_reproducibility(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / 'source'

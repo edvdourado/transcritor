@@ -4,9 +4,10 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from app.config import settings
-from app.jobs import Jobs
+from app.jobs import JobResponse, Jobs
 from app.main import create_app
 from app.audio import AudioProcessor
 
@@ -42,6 +43,7 @@ def test_create_and_query(client):
     job = response.json()
     assert job['state'] == 'processing'
     assert job['model'] == 'small'
+    assert job['segments'] == []
     queried = client.get('/api/v1/jobs/' + job['id']).json()
     assert queried.pop('total_seconds') >= job.pop('total_seconds') >= 0
     assert queried.pop('processing_seconds') is not None
@@ -211,8 +213,29 @@ def test_actual_mock_completion(tmp_path):
         assert result['state'] == 'completed'
         assert 'TESTE MOCK' in result['transcript']
         assert 'medium' in result['transcript']
+        assert result['segments'] == []
         assert client.delete('/api/v1/jobs/' + job_id).status_code == 204
         assert list(client.app.state.directory.iterdir()) == []
+
+
+@pytest.mark.parametrize('segment', [
+    {'text': '', 'start': 0, 'end': 1}, {'text': ' \n', 'start': 0, 'end': 1},
+    {'text': 42, 'start': 0, 'end': 1}, {'text': 'a', 'start': -1, 'end': 1},
+    {'text': 'a', 'start': 1, 'end': 1}, {'text': 'a', 'start': 2, 'end': 1},
+    {'text': 'a', 'start': False, 'end': 1}, {'text': 'a', 'start': '0', 'end': 1},
+    {'text': 'a', 'start': 0, 'end': float('inf')}, {'text': 'a', 'start': float('nan'), 'end': 1},
+    {'text': 'a', 'start': 0},
+])
+def test_segment_response_contract_validates_creation_and_assignment(segment):
+    values = dict(id=uuid4(), model='small', state='completed', transcript='Texto')
+    with pytest.raises(ValidationError):
+        JobResponse(**values, segments=[segment])
+    response = JobResponse(**values)
+    assert response.segments == []
+    with pytest.raises(ValidationError):
+        response.segments = [segment]
+    response.segments = [{'text': ' Texto ', 'start': 0, 'end': 1.25}]
+    assert response.model_dump(mode='json')['segments'] == [{'text': ' Texto ', 'start': 0.0, 'end': 1.25}]
 
 
 @pytest.mark.parametrize('failure', [None, RuntimeError, TimeoutError])

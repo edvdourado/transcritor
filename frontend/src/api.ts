@@ -1,5 +1,6 @@
 export type Model = 'small' | 'medium'
 export type Engine = 'mock' | 'whisper'
+export type Segment = { text: string; start: number; end: number }
 export type Job = {
   id: string
   model: Model
@@ -10,6 +11,7 @@ export type Job = {
   total_seconds?: number | null
   processing_seconds?: number | null
   audio_duration_seconds?: number | null
+  segments?: Segment[]
 }
 
 export class ApiError extends Error {
@@ -59,7 +61,14 @@ async function readJob(response: Response): Promise<Job> {
       (value.state === 'completed' && typeof value.transcript !== 'string')) {
     throw new ApiError('A API retornou uma resposta inesperada. Tente consultar novamente.', 502)
   }
-  return value as Job
+  // Optional review metadata must never prevent access to the editable text.
+  const segments = 'segments' in value && Array.isArray(value.segments) ? value.segments.filter((segment): segment is Segment =>
+    segment !== null && typeof segment === 'object' &&
+    typeof segment.text === 'string' && segment.text.trim().length > 0 &&
+    typeof segment.start === 'number' && Number.isFinite(segment.start) && segment.start >= 0 &&
+    typeof segment.end === 'number' && Number.isFinite(segment.end) && segment.end > segment.start,
+  ) : []
+  return { ...value, segments } as Job
 }
 
 export const api = {

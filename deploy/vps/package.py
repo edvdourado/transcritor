@@ -9,14 +9,14 @@ from pathlib import Path
 
 FILES = (
     '.env.example', '.gitignore', 'README.md', 'backend/pyproject.toml',
-    'docs/DEPLOY.md', 'docs/PUBLICACAO.md',
+    'docs/DEPLOY.md', 'docs/PUBLICACAO.md', 'docs/TESTE_V11_ORACLE.md',
     'frontend/package.json', 'frontend/package-lock.json', 'frontend/index.html',
-    'frontend/vite.config.ts', 'frontend/tsconfig.json',
+    'frontend/vite.config.ts', 'frontend/vite.review.config.ts', 'frontend/tsconfig.json',
     'frontend/tsconfig.app.json', 'frontend/tsconfig.node.json',
     'deploy/vps/README.md', 'deploy/vps/.env.vps.example',
     'deploy/vps/transcritor.service', 'deploy/vps/nginx.conf.example',
     'deploy/vps/requirements-py310-arm64.txt',
-    'deploy/vps/package.py', 'deploy/vps/test_package.py',
+    'deploy/vps/package.py', 'deploy/vps/test_package.py', 'deploy/vps/review.py',
 )
 PATTERNS = ('backend/app/*.py', 'backend/test_*.py',
             'frontend/src/**/*.ts', 'frontend/src/**/*.tsx', 'frontend/src/**/*.css')

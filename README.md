@@ -78,6 +78,41 @@ Abra a URL mostrada pelo Vite (normalmente `http://localhost:5173`). No PowerShe
 
 O backend carrega o `.env` da raiz; variáveis do processo têm precedência. Caminhos relativos de temporários dependem do diretório de execução. Caminhos de ferramentas contêm apenas o executável, sem argumentos; use binários nativos, sem wrappers `.bat`/`.cmd`. Nunca coloque segredos em variáveis do frontend.
 
+## Versão 1.1 — revisão sincronizada
+
+Após concluir uma transcrição, marque **Revisão sincronizada** no painel Transcrição. A lista mostra os trechos originais com timestamps; o destaque acompanha a posição do áudio e rola somente dentro da lista. Clique em um trecho para avançar até seu início e reproduzir. Tab, setas para cima/baixo, Home e End navegam pelos botões; Enter ou Espaço iniciam o trecho. No celular, as abas Áudio e Transcrição mantêm o player e a revisão montados.
+
+Desmarque a opção para voltar ao editor, com suas edições preservadas. **Copiar e Exportar TXT sempre usam o texto do editor**, mesmo durante a revisão sincronizada. Edições livres não são associadas aos segmentos originais. O controle de velocidade no painel Áudio oferece 0,75×, 1×, 1,25×, 1,5× e 2×; a posição e os timestamps continuam em segundos do áudio, independentemente da velocidade.
+
+O contrato de `POST /api/v1/jobs` e `GET /api/v1/jobs/{id}` ganhou somente o campo aditivo `segments`:
+
+```json
+{
+  "segments": [
+    { "text": " Olá, ação.", "start": 0.0, "end": 1.23 },
+    { "text": " Segundo trecho.", "start": 1.23, "end": 2.5 }
+  ]
+}
+```
+
+Os demais campos da resposta permanecem iguais. A lista é vazia antes da conclusão, no mock e quando não há tempos utilizáveis. Cada segmento exige texto não vazio, números finitos, `start >= 0` e `end > start`, com validação Pydantic. Espaços e quebras de linha do texto original são preservados.
+
+Os offsets `from`/`to` do JSON do whisper-cli são posições absolutas no áudio em **milissegundos**: o [exportador oficial do Whisper.cpp v1.8.2](https://github.com/ggml-org/whisper.cpp/blob/v1.8.2/examples/cli/cli.cpp#L635-L643) multiplica por 10 os ticks internos de 10 ms. Por isso, o backend divide os offsets do JSON por **1.000**, não por 100. A execução atual usa o WAV completo, sem recorte temporal. Na ausência de `offsets`, aceita `timestamps` no formato `HH:MM:SS,mmm` ou com ponto. Offsets presentes prevalecem; tempos inválidos, intervalos de duração zero e textos em branco ficam fora da lista sincronizada, sem remover seu texto do editor. Saída com estrutura/texto inválidos continua falhando com mensagem segura.
+
+Compatibilidade: clientes anteriores podem ignorar `segments`; o frontend aceita APIs antigas sem o campo. Metadados opcionais malformados são filtrados, preservando o editor. Intervalos usam `[start, end)`: silêncio entre trechos não mantém destaque; em sobreposições, vence o primeiro intervalo correspondente na ordem original. Não há estimativa de tempos para mock ou texto sem timestamps. Falhas no áudio desabilitam os saltos e a velocidade até a recarga; trechos que começam fora da duração do áudio também não permitem saltos. A velocidade retorna a 1× e o modo ao editor em uma nova transcrição.
+
+Para conferir localmente, inicie backend e frontend conforme os comandos acima, com os binários e modelos Small/Medium **já existentes** configurados para `TRANSCRITOR_ENGINE=whisper`. Envie um áudio e verifique:
+
+1. Edite uma frase; ative/desative a revisão e confira que o editor preservou a alteração e os trechos conservaram o original.
+2. Reproduza, avance e volte pelo player; clique em um trecho e repita com Enter/Espaço.
+3. Experimente as cinco velocidades, Copiar e TXT com o modo sincronizado ativo.
+4. Confira desktop, abas no celular e uma tela com pouca altura; a página não deve rolar, e a lista deve rolar internamente.
+5. Inicie outra transcrição e confira a limpeza do destaque e o retorno a 1×. No mock, confira a revisão desabilitada e o editor funcional.
+
+A suíte cobre conversão e fallback de timestamps, validação do contrato, mock/API antiga, sincronização, teclado, cliques, velocidades, indisponibilidade/recarga do áudio e preservação de edições, cópia e exportação. A precisão temporal depende dos segmentos do Whisper; os testes simulam o CLI e não substituem uma conferência com fala e modelos reais.
+
+Validação local em 28/10/2026: **144 testes backend** (Python 3.12, incluindo FFmpeg/FFprobe), **83 testes frontend** e **build TypeScript/Vite** aprovados. Conferência no navegador com áudio/segmentos sintéticos: desktop 1280×720, celular 390×844 e viewport reduzido 390×360 sem rolagem da página; Enter/Espaço, salto e velocidade conferidos. O backend apresentou apenas o aviso já existente de depreciação do httpx no TestClient do Starlette. Não houve inferência com modelos reais nesta validação. Os testes backend precisaram executar fora da restrição de rede do sandbox, que bloqueia o socket interno do asyncio no Windows; temporários ficaram dentro de `tmp/` do projeto.
+
 ## Execução, testes e build
 
 Na raiz, com as dependências de teste instaladas:
@@ -149,6 +184,7 @@ Todos os valores estão em [.env.example](.env.example). Principais opções:
 
 ## Documentação adicional
 
+- [Teste real isolado da v1.1 na Oracle](docs/TESTE_V11_ORACLE.md): snapshot atual, backend em 8766, túnel SSH, Vite exclusivo e roteiro de validação sem deploy.
 - [Implantação Oracle ARM64 / Ubuntu 22.04](docs/DEPLOY.md): instalação, Nginx, HTTPS, systemd, atualização e rollback.
 - [Auditoria e preparação da publicação](docs/PUBLICACAO.md): escopo, resultados, limites e comandos Git.
 - [Empacotamento opcional de fontes](deploy/vps/README.md): pacote determinístico com lista de arquivos permitidos.

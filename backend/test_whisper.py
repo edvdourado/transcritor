@@ -16,7 +16,7 @@ from app.audio import AudioProcessor
 from app.config import settings
 from app.jobs import Jobs
 from app.main import create_app
-from app.transcriber import MockTranscriber, TranscriptionError, WhisperTranscriber, read_transcription
+from app.transcriber import MockTranscriber, Segment, TranscriptionError, WhisperTranscriber, read_transcription
 
 
 SEGMENTS = [
@@ -25,6 +25,8 @@ SEGMENTS = [
     {'text': '\nSem correções.  ', 'offsets': {'from': 1230, 'to': 2500}},
 ]
 TEXT = ''.join(segment['text'] for segment in SEGMENTS)
+NORMALIZED = [Segment(text=SEGMENTS[0]['text'], start=0, end=1.23),
+              Segment(text=SEGMENTS[1]['text'], start=1.23, end=2.5)]
 
 
 @pytest.fixture
@@ -86,7 +88,7 @@ def test_execution_arguments_and_verbatim_output(cli, model):
     config, source, calls, processes = cli
     result = asyncio.run(WhisperTranscriber(config).transcribe(source, model))
     assert result.text == TEXT
-    assert result.segments == SEGMENTS
+    assert result.segments == NORMALIZED
     executable, args, options = calls[0]
     expected = config.whisper_model_small if model == 'small' else config.whisper_model_medium
     assert executable == sys.executable
@@ -202,12 +204,6 @@ def test_cancel_while_spawning(cli, monkeypatch):
     {'transcription': [None]}, {'transcription': [{}]},
     {'transcription': [{'text': 123}]},
     {'transcription': [{'text': '\ud800'}]},
-    {'transcription': [{'text': 'a', 'offsets': {'from': -1, 'to': 2}}]},
-    {'transcription': [{'text': 'a', 'offsets': {'from': 3, 'to': 2}}]},
-    {'transcription': [{'text': 'a', 'offsets': {'from': True, 'to': 2}}]},
-    {'transcription': [{'text': 'a', 'offsets': {'from': 0, 'to': float('nan')}}]},
-    {'transcription': [{'text': 'a', 'timestamps': {'from': 'bad', 'to': 'bad'}}]},
-    {'transcription': [{'text': 'a', 'timestamps': None}]},
 ])
 def test_invalid_json_structure(tmp_path, data):
     path = tmp_path / 'output.json'
@@ -223,6 +219,43 @@ def test_empty_segments_and_output_limit(tmp_path):
     path.write_bytes(b' ' * (8 * 1024 * 1024 + 1))
     with pytest.raises(TranscriptionError):
         read_transcription(path)
+
+
+@pytest.mark.parametrize('timing', [
+    {}, {'offsets': None}, {'offsets': {'from': 0}},
+    {'offsets': {'from': -1, 'to': 2}}, {'offsets': {'from': 3, 'to': 2}},
+    {'offsets': {'from': 2, 'to': 2}}, {'offsets': {'from': True, 'to': 2}},
+    {'offsets': {'from': '0', 'to': 2}}, {'offsets': {'from': 0, 'to': float('nan')}},
+    {'offsets': {'from': 0, 'to': float('inf')}}, {'offsets': {'from': 0, 'to': 10**400}},
+    {'timestamps': {'from': 'bad', 'to': 'bad'}}, {'timestamps': None},
+    {'timestamps': {'from': '00:60:00,000', 'to': '01:00:01,000'}},
+    {'timestamps': {'from': '00:00:02,000', 'to': '00:00:01,000'}},
+    {'timestamps': {'from': '00:00:01,000', 'to': '00:00:01,000'}},
+])
+def test_bad_or_missing_timing_preserves_text_and_valid_siblings(tmp_path, timing):
+    path = tmp_path / 'output.json'
+    path.write_text(json.dumps({'transcription': [SEGMENTS[0], {'text': '\nTexto preservado.', **timing}, SEGMENTS[1]]}), encoding='utf-8')
+    result = read_transcription(path)
+    assert result.text == SEGMENTS[0]['text'] + '\nTexto preservado.' + SEGMENTS[1]['text']
+    assert result.segments == NORMALIZED
+
+
+@pytest.mark.parametrize('separator', [',', '.'])
+def test_timestamp_fallback_and_millisecond_offsets(tmp_path, separator):
+    path = tmp_path / 'output.json'
+    path.write_text(json.dumps({'transcription': [
+        {'text': ' Primeiro.', 'offsets': {'from': 1230, 'to': 2500},
+         'timestamps': {'from': '00:00:09,000', 'to': '00:00:10,000'}},
+        {'text': '\nDepois.', 'timestamps': {'from': f'100:01:02{separator}345', 'to': f'100:01:03{separator}456'}},
+        {'text': '  ', 'offsets': {'from': 0, 'to': 1000}},
+        {'text': '', 'offsets': {'from': 0, 'to': 1000}},
+    ]}), encoding='utf-8')
+    result = read_transcription(path)
+    assert result.text == ' Primeiro.\nDepois.  '
+    assert [segment.model_dump() for segment in result.segments] == [
+        {'text': ' Primeiro.', 'start': 1.23, 'end': 2.5},
+        {'text': '\nDepois.', 'start': 360062.345, 'end': 360063.456},
+    ]
 
 
 @pytest.mark.parametrize('finish', ['success', 'exit', 'timeout', 'cancel'])
@@ -255,7 +288,7 @@ def test_queue_keeps_one_active_and_advances(cli, monkeypatch, finish):
             assert await manager.get(first.id) is None
         await manager.items[second.id].task
         assert (await manager.get(second.id)).transcript == TEXT
-        assert manager.items[second.id].segments == SEGMENTS
+        assert manager.items[second.id].response.segments == NORMALIZED
         assert manager.active is None
         await manager.close()
         assert not second_input.exists()
@@ -296,7 +329,7 @@ def test_api_compatibility_and_actual_engine(cli, monkeypatch, engine):
         assert created.status_code == 202
         job = created.json()
         assert set(job) == {'id', 'model', 'state', 'transcript', 'error', 'engine',
-                            'total_seconds', 'processing_seconds', 'audio_duration_seconds'}
+                            'total_seconds', 'processing_seconds', 'audio_duration_seconds', 'segments'}
         assert job['engine'] == engine
 
         async def finish():
@@ -311,7 +344,8 @@ def test_api_compatibility_and_actual_engine(cli, monkeypatch, engine):
         assert result['transcript'] == TEXT if engine == 'whisper' else 'TESTE MOCK' in result['transcript']
         if engine == 'whisper':
             assert Path(calls[0][1][3]).suffix == '.wav'
-            assert client.app.state.jobs.items[UUID(job['id'])].segments == SEGMENTS
+            assert client.app.state.jobs.items[UUID(job['id'])].response.segments == NORMALIZED
+        assert result['segments'] == ([segment.model_dump() for segment in NORMALIZED] if engine == 'whisper' else [])
         assert 'secret' not in json.dumps(result)
         assert client.delete('/api/v1/jobs/' + job['id']).status_code == 204
         assert list(client.app.state.directory.iterdir()) == []

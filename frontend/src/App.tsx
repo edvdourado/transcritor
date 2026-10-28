@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from './api'
 import type { Engine, Model } from './api'
 import { AudioUploader } from './components/AudioUploader'
@@ -7,6 +7,7 @@ import { JobStatus } from './components/JobStatus'
 import { TranscriptEditor } from './components/TranscriptEditor'
 import { Icon } from './components/Icon'
 import { AudioPlayer } from './components/AudioPlayer'
+import type { PlaybackPosition } from './components/AudioPlayer'
 import { useTranscription } from './useTranscription'
 import { formatDuration } from './duration'
 
@@ -24,6 +25,8 @@ export default function App() {
   const [model, setModel] = useState<Model>('small')
   const [panel, setPanel] = useState<'audio' | 'transcript'>('audio')
   const [configuredEngine, setConfiguredEngine] = useState<Engine | null>(null)
+  const audioRef = useRef<HTMLAudioElement>(null)
+  const [position, setPosition] = useState<PlaybackPosition | null>(null)
   const flow = useTranscription()
   const { job, busy, active, paused, missing } = flow
   const engine = job ? job.engine : configuredEngine
@@ -59,7 +62,15 @@ export default function App() {
     if (window.matchMedia?.('(max-width: 760px)').matches) document.getElementById('transcript-tab')?.focus()
   }, [job?.id, job?.state])
 
-  function newTranscription() { flow.reset(); setFile(null); setPanel('audio') }
+  function newTranscription() { flow.reset(); setFile(null); setPanel('audio'); setPosition(null) }
+
+  async function seek(start: number) {
+    const audio = audioRef.current
+    if (!audio || !position || start >= audio.duration) throw new Error('Áudio indisponível para este trecho.')
+    audio.currentTime = start
+    setPosition({ time: start, duration: audio.duration })
+    await audio.play()
+  }
 
   function selectPanel(next: 'audio' | 'transcript') {
     setPanel(next)
@@ -90,7 +101,7 @@ export default function App() {
             </form>
             {job && <div className="model-summary"><span className="muted">Duração do áudio</span><strong className="job-time">{job.audio_duration_seconds != null ? formatDuration(job.audio_duration_seconds) : 'Indisponível'}</strong></div>}
             {(job || busy === 'upload') && <JobStatus job={job} uploading={busy === 'upload'} paused={paused} missing={missing} cancelling={busy === 'cancel'} />}
-            {job?.state === 'completed' && <AudioPlayer key={job.id} jobId={job.id} />}
+            {job?.state === 'completed' && <AudioPlayer key={job.id} jobId={job.id} audioRef={audioRef} onPositionChange={setPosition} />}
             {engine === 'mock' && <p className="mock-info"><strong>Transcritor mock.</strong> O resultado é fictício e não representa o conteúdo do áudio.</p>}
           </div>
           <div className="audio-panel-actions">
@@ -100,12 +111,16 @@ export default function App() {
             {(job?.state === 'failed' || missing) && <button className="button secondary" onClick={newTranscription}>Nova transcrição</button>}
             {job?.state === 'completed' && <button className="button primary" onClick={() => {
               if (window.matchMedia?.('(max-width: 760px)').matches) selectPanel('transcript')
-              else document.getElementById('transcript')?.focus()
+              else {
+                const editor = document.getElementById('transcript')
+                if (editor?.hidden) document.querySelector<HTMLElement>('.segment-list')?.focus()
+                else editor?.focus()
+              }
             }}>Revisar transcrição <Icon name="arrow" size={16} /></button>}
           </div>
         </section>
         <section id="transcript-panel" role="tabpanel" aria-labelledby="transcript-tab" data-active={panel === 'transcript'} className="panel editor-panel">
-          {job?.state === 'completed' ? <TranscriptEditor key={job.id} job={job} fileName={file?.name || 'transcricao'} onNew={newTranscription} /> : <div className="empty-editor">
+          {job?.state === 'completed' ? <TranscriptEditor key={job.id} job={job} fileName={file?.name || 'transcricao'} onNew={newTranscription} position={position} onSeek={seek} /> : <div className="empty-editor">
             <div className="editor-toolbar"><h2>Transcrição</h2><div className="editor-actions"><button className="button quiet" disabled><Icon name="copy" size={16} />Copiar</button><button className="button secondary" disabled><Icon name="download" size={16} />Exportar TXT</button></div></div>
             <div className="transcript-placeholder"><Icon name="file" size={28} /><h3>{active || busy ? 'Aguardando o resultado' : 'Seu texto aparece aqui'}</h3><p>Envie um áudio no painel Áudio.<br />Depois, ouça, edite e exporte sua transcrição.</p></div>
             <p className="empty-editor-footer muted">Edições somente nesta aba · Sem salvamento automático</p>

@@ -6,15 +6,15 @@ from pathlib import Path
 from typing import Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from app.transcriber import Engine, Model, Transcriber, Transcription
+from app.transcriber import Engine, Model, Segment, Transcriber, Transcription
 from app.audio import AudioProcessor
 
 logger = logging.getLogger(__name__)
 
 
-class JobResponse(BaseModel):
+class JobResponse(BaseModel, validate_assignment=True):
     id: UUID
     model: Model
     state: Literal["queued", "processing", "completed", "failed"]
@@ -24,6 +24,7 @@ class JobResponse(BaseModel):
     total_seconds: float | None = None
     processing_seconds: float | None = None
     audio_duration_seconds: float | None = None
+    segments: list[Segment] = Field(default_factory=list)
 
 
 @dataclass
@@ -35,7 +36,6 @@ class Job:
     finished: float | None = None
     task: asyncio.Task | None = None
     prepared_path: Path | None = None
-    segments: list[dict] | None = None
     audio_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -97,7 +97,7 @@ class Jobs:
             result = await self.transcriber.transcribe(
                 job.prepared_path or job.path, job.response.model)
             if isinstance(result, Transcription):
-                job.segments = result.segments
+                job.response.segments = result.segments
                 result = result.text
             job.response.transcript = result
             job.response.state = "completed"

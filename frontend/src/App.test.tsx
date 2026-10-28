@@ -12,6 +12,11 @@ import { POLL_INTERVAL } from './useTranscription'
 const id = 'c751d5db-48c7-43cc-b479-c16ad24b3342'
 const job: Job = { id, model: 'small', state: 'queued', transcript: null, error: null, engine: 'mock' }
 const completed: Job = { ...job, state: 'completed', transcript: '[TESTE MOCK — small] Texto fictício.\nSegunda linha.' }
+const synchronizedJob: Job = { ...completed, engine: 'whisper', transcript: ' Primeiro. Segundo.\nTerceiro.', segments: [
+  { text: ' Primeiro.', start: 0.25, end: 1.25 },
+  { text: ' Segundo.', start: 1.25, end: 2.5 },
+  { text: '\nTerceiro.', start: 3, end: 4 },
+] }
 const audio = new File(['audio'], 'entrevista.WAV', { type: 'audio/wav' })
 const fetchMock = vi.fn<typeof fetch>()
 
@@ -37,6 +42,16 @@ async function start(value: Job = job) {
   fireEvent.click(screen.getByRole('button', { name: 'Iniciar transcrição' }))
   await settle()
 }
+
+function readyAudio(duration = 6) {
+  const player = screen.getByLabelText('Áudio da transcrição') as HTMLAudioElement
+  Object.defineProperty(player, 'duration', { configurable: true, value: duration })
+  Object.defineProperty(player, 'readyState', { configurable: true, value: 1 })
+  fireEvent.loadedMetadata(player)
+  return player
+}
+
+function review() { fireEvent.click(screen.getByRole('checkbox', { name: 'Revisão sincronizada' })) }
 
 beforeEach(() => {
   vi.useFakeTimers()
@@ -294,12 +309,13 @@ test('desmontagem aborta upload', async () => {
   expect(fetchMock).toHaveBeenCalledOnce()
 })
 
-test('edita, copia e exporta exatamente o texto local com quebras de linha', async () => {
-  mount(); await start(completed)
+test.each([false, true])('edita, copia e exporta texto local com quebras de linha; modo sincronizado: %s', async synchronized => {
+  mount(); await start(synchronizedJob)
   const text = 'Minha revisão.\n\n' + Array.from({ length: 500 }, (_, line) => `Linha ${line + 1}: ação, voz e atenção.`).join('\n')
   const writeText = vi.fn().mockResolvedValue(undefined)
   Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
   fireEvent.change(screen.getByRole('textbox', { name: 'Transcrição' }), { target: { value: text } })
+  if (synchronized) review()
   fireEvent.click(screen.getByRole('button', { name: 'Copiar' })); await settle()
   expect(writeText).toHaveBeenCalledWith(text)
   expect(screen.getByRole('button', { name: 'Copiado' })).toBeTruthy()
@@ -563,4 +579,233 @@ test('fila não inventa processamento e desmontagem limpa contador ativo', async
   expect(vi.getTimerCount()).toBe(1)
   view.unmount()
   expect(vi.getTimerCount()).toBe(0)
+})
+
+test.each([undefined, null, [], {}, 'invalid'])(
+  'metadados de segmentos ausentes ou inutilizáveis (%s) preservam o editor', async segments => {
+    mount(); await start({ ...synchronizedJob, segments } as Job)
+    expect((screen.getByRole('textbox', { name: 'Transcrição' }) as HTMLTextAreaElement).value).toBe(synchronizedJob.transcript)
+    expect((screen.getByRole('checkbox', { name: 'Revisão sincronizada' }) as HTMLInputElement).disabled).toBe(true)
+    expect(screen.getByText('Sem timestamps válidos para sincronizar.')).toBeTruthy()
+  },
+)
+
+test('valida segmentos opcionais sem perder texto ou aceitar valores inválidos', async () => {
+  const invalid = [null, 1, [], {}, { text: '', start: 0, end: 1 }, { text: ' \n', start: 0, end: 1 },
+    { text: 3, start: 0, end: 1 }, { text: 'a', start: -1, end: 1 }, { text: 'a', start: '0', end: 1 },
+    { text: 'a', start: true, end: 1 }, { text: 'a', start: 1, end: 1 }, { text: 'a', start: 2, end: 1 },
+    { text: 'a', start: NaN, end: 1 }, { text: 'a', start: 0, end: Infinity }, { text: 'a', start: 0 }]
+  fetchMock.mockResolvedValueOnce(response({ ...synchronizedJob, segments: [...invalid, ...synchronizedJob.segments!] }))
+  const result = await api.get(id, new AbortController().signal)
+  expect(result.segments).toEqual(synchronizedJob.segments)
+  expect(result.transcript).toBe(synchronizedJob.transcript)
+})
+
+test('mock nunca associa seus segmentos ao áudio', async () => {
+  mount(); await start({ ...synchronizedJob, engine: 'mock' })
+  expect((screen.getByRole('checkbox', { name: 'Revisão sincronizada' }) as HTMLInputElement).disabled).toBe(true)
+  expect(screen.getByRole('textbox', { name: 'Transcrição' })).toBeTruthy()
+})
+
+test('sincroniza limites, lacunas, avanço e retorno do player sem mudar o texto', async () => {
+  mount(); await start(synchronizedJob)
+  expect((screen.getByRole('checkbox', { name: 'Revisão sincronizada' }) as HTMLInputElement).checked).toBe(false)
+  const player = readyAudio()
+  review()
+  const segments = screen.getAllByRole('button', { name: /Primeiro\.|Segundo\.|Terceiro\./ })
+  for (const [time, index] of [[0, -1], [0.25, 0], [1.249, 0], [1.25, 1], [2.5, -1], [2.9, -1], [3, 2], [4, -1], [0.5, 0]]) {
+    player.currentTime = time
+    fireEvent.timeUpdate(player)
+    expect(segments.map(button => button.getAttribute('aria-current'))).toEqual(segments.map((_, i) => i === index ? 'true' : null))
+  }
+  player.currentTime = 3.5
+  fireEvent.seeking(player)
+  expect(segments[2].getAttribute('aria-current')).toBe('true')
+  player.currentTime = 6
+  fireEvent.ended(player)
+  expect(segments.every(button => !button.hasAttribute('aria-current'))).toBe(true)
+  review()
+  expect((screen.getByRole('textbox', { name: 'Transcrição' }) as HTMLTextAreaElement).value).toBe(synchronizedJob.transcript)
+})
+
+test('clicar em trecho avança em segundos, reproduz e destaca imediatamente', async () => {
+  mount(); await start(synchronizedJob)
+  const player = readyAudio()
+  const play = vi.spyOn(player, 'play').mockResolvedValue(undefined)
+  review()
+  const second = screen.getByRole('button', { name: /Segundo\./ })
+  fireEvent.click(second)
+  await settle()
+  expect(player.currentTime).toBe(1.25)
+  expect(play).toHaveBeenCalledOnce()
+  expect(second.getAttribute('aria-current')).toBe('true')
+})
+
+test('trechos são botões nativos e setas, Home e End navegam sem reproduzir', async () => {
+  mount(); await start(synchronizedJob)
+  const player = readyAudio()
+  const play = vi.spyOn(player, 'play').mockResolvedValue(undefined)
+  review()
+  const first = screen.getByRole('button', { name: /Primeiro\./ }) as HTMLButtonElement
+  const second = screen.getByRole('button', { name: /Segundo\./ })
+  const third = screen.getByRole('button', { name: /Terceiro\./ })
+  expect(first.type).toBe('button') // Native Enter/Space activation; no custom key interception.
+  expect(first.tabIndex).toBe(0)
+  first.focus()
+  fireEvent.keyDown(first, { key: 'ArrowDown' })
+  expect(document.activeElement).toBe(second)
+  fireEvent.keyDown(second, { key: 'End' })
+  expect(document.activeElement).toBe(third)
+  fireEvent.keyDown(third, { key: 'ArrowUp' })
+  expect(document.activeElement).toBe(second)
+  fireEvent.keyDown(second, { key: 'Home' })
+  expect(document.activeElement).toBe(first)
+  expect(play).not.toHaveBeenCalled()
+  player.currentTime = 3.5
+  fireEvent.timeUpdate(player)
+  expect(document.activeElement).toBe(first)
+})
+
+test('segue trecho ativo rolando apenas o painel interno', async () => {
+  mount(); await start(synchronizedJob)
+  const player = readyAudio()
+  review()
+  const list = screen.getByRole('list', { name: 'Trechos da transcrição original' })
+  vi.spyOn(list, 'getBoundingClientRect').mockReturnValue({ top: 10, bottom: 110 } as DOMRect)
+  vi.spyOn(list.children[2], 'getBoundingClientRect').mockReturnValue({ top: 150, bottom: 190 } as DOMRect)
+  player.currentTime = 3.5
+  fireEvent.timeUpdate(player)
+  expect(list.scrollTop).toBe(80)
+  expect(document.documentElement.scrollTop).toBe(0)
+  expect(document.body.scrollTop).toBe(0)
+})
+
+test('velocidades solicitadas afetam o áudio e sobrevivem à recarga, sem alterar timestamps', async () => {
+  mount(); await start(synchronizedJob)
+  const speed = screen.getByRole('combobox', { name: 'Velocidade de reprodução' }) as HTMLSelectElement
+  expect(speed.disabled).toBe(true)
+  let player = readyAudio()
+  expect(speed.disabled).toBe(false)
+  expect(player.playbackRate).toBe(1)
+  expect(Array.from(speed.options, option => option.textContent)).toEqual(['0,75×', '1×', '1,25×', '1,5×', '2×'])
+  review()
+  player.currentTime = 1.5
+  fireEvent.timeUpdate(player)
+  for (const rate of [0.75, 1, 1.25, 1.5, 2]) {
+    fireEvent.change(speed, { target: { value: String(rate) } })
+    expect(player.playbackRate).toBe(rate)
+    expect(screen.getByRole('button', { name: /Segundo\./ }).getAttribute('aria-current')).toBe('true')
+  }
+  fireEvent.error(player)
+  expect(speed.disabled).toBe(true)
+  expect(screen.getByRole('button', { name: /Segundo\./ }).getAttribute('aria-current')).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: 'Tentar carregar áudio novamente' }))
+  player = readyAudio()
+  expect(player.playbackRate).toBe(2)
+  expect(speed.value).toBe('2')
+  player.playbackRate = 0.5 // A browser's native controls may offer other rates.
+  fireEvent.rateChange(player)
+  expect(speed.value).toBe('0.5')
+  expect(screen.getByRole('option', { name: '0,5×' })).toBeTruthy()
+})
+
+test('áudio indisponível e trechos fora da duração não permitem saltos inválidos', async () => {
+  mount(); await start(synchronizedJob)
+  review()
+  const first = screen.getByRole('button', { name: /Primeiro\./ }) as HTMLButtonElement
+  expect(first.disabled).toBe(true)
+  const player = readyAudio(3)
+  expect(first.disabled).toBe(false)
+  expect((screen.getByRole('button', { name: /Terceiro\./ }) as HTMLButtonElement).disabled).toBe(true)
+  fireEvent.error(player)
+  expect(first.disabled).toBe(true)
+  expect(screen.getByText(/Carregue ou tente novamente/)).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: 'Tentar carregar áudio novamente' }))
+  readyAudio()
+  expect(first.disabled).toBe(false)
+})
+
+test('falha ao iniciar reprodução informa alternativa e preserva revisão', async () => {
+  mount(); await start(synchronizedJob)
+  const player = readyAudio()
+  vi.spyOn(player, 'play').mockRejectedValue(new Error('blocked'))
+  review()
+  fireEvent.click(screen.getByRole('button', { name: /Segundo\./ }))
+  await settle()
+  expect(screen.getByText(/Não foi possível iniciar a reprodução/)).toBeTruthy()
+  review()
+  expect((screen.getByRole('textbox', { name: 'Transcrição' }) as HTMLTextAreaElement).value).toBe(synchronizedJob.transcript)
+})
+
+test('alternar modo e abas preserva editor e áudio; novo trabalho reinicia sincronização e velocidade', async () => {
+  mount(); await start(synchronizedJob)
+  const player = readyAudio()
+  const editor = screen.getByRole('textbox', { name: 'Transcrição' }) as HTMLTextAreaElement
+  fireEvent.change(editor, { target: { value: 'Revisão independente.' } })
+  review()
+  expect(screen.getByRole('button', { name: /Primeiro\./ }).textContent).toContain('Primeiro.')
+  expect(screen.queryByRole('textbox', { name: 'Transcrição' })).toBeNull()
+  fireEvent.click(screen.getByRole('tab', { name: 'Áudio' }))
+  fireEvent.click(screen.getByRole('tab', { name: 'Transcrição' }))
+  expect(screen.getByLabelText('Áudio da transcrição')).toBe(player)
+  review()
+  expect(screen.getByRole('textbox', { name: 'Transcrição' })).toBe(editor)
+  expect(editor.value).toBe('Revisão independente.')
+  fireEvent.change(screen.getByRole('combobox', { name: 'Velocidade de reprodução' }), { target: { value: '2' } })
+  review()
+  fireEvent.click(screen.getByRole('button', { name: 'Nova transcrição' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Descartar e iniciar nova' }))
+  const nextId = 'd751d5db-48c7-43cc-b479-c16ad24b3342'
+  await start({ ...synchronizedJob, id: nextId })
+  expect((screen.getByRole('checkbox', { name: 'Revisão sincronizada' }) as HTMLInputElement).checked).toBe(false)
+  expect((screen.getByRole('combobox', { name: 'Velocidade de reprodução' }) as HTMLSelectElement).value).toBe('1')
+  expect(screen.getByLabelText('Áudio da transcrição').getAttribute('src')).toBe(api.audioUrl(nextId))
+  review()
+  expect((screen.getByRole('button', { name: /Primeiro\./ }) as HTMLButtonElement).disabled).toBe(true)
+  expect(screen.queryByText('Revisão independente.')).toBeNull()
+})
+
+test('intervalos sobrepostos ou fora de ordem escolhem o primeiro trecho correspondente', async () => {
+  mount(); await start({ ...synchronizedJob, segments: [
+    { text: 'Sobreposição', start: 1, end: 3 }, { text: 'Anterior', start: 0, end: 2 },
+  ] })
+  const player = readyAudio()
+  review()
+  player.currentTime = 1.5
+  fireEvent.timeUpdate(player)
+  expect(screen.getByRole('button', { name: /Sobreposição/ }).getAttribute('aria-current')).toBe('true')
+  expect(screen.getByRole('button', { name: /Anterior/ }).getAttribute('aria-current')).toBeNull()
+  player.currentTime = 0.5
+  fireEvent.timeUpdate(player)
+  expect(screen.getByRole('button', { name: /Anterior/ }).getAttribute('aria-current')).toBe('true')
+})
+
+test('atalho de revisão no desktop foca a lista quando o editor está oculto', async () => {
+  mount(); await start(synchronizedJob)
+  readyAudio()
+  review()
+  fireEvent.click(screen.getByRole('button', { name: /Revisar transcrição/ }))
+  expect(document.activeElement).toBe(screen.getByRole('list', { name: 'Trechos da transcrição original' }))
+  review()
+  fireEvent.click(screen.getByRole('button', { name: /Revisar transcrição/ }))
+  expect(document.activeElement).toBe(screen.getByRole('textbox', { name: 'Transcrição' }))
+})
+
+test('metadados de áudio inválidos limpam a posição e bloqueiam os controles até recuperar', async () => {
+  mount(); await start(synchronizedJob)
+  const player = readyAudio()
+  review()
+  const first = screen.getByRole('button', { name: /Primeiro\./ }) as HTMLButtonElement
+  const speed = screen.getByRole('combobox', { name: 'Velocidade de reprodução' }) as HTMLSelectElement
+  for (const duration of [NaN, Infinity, 0]) {
+    Object.defineProperty(player, 'duration', { configurable: true, value: duration })
+    fireEvent.durationChange(player)
+    expect(first.disabled).toBe(true)
+    expect(speed.disabled).toBe(true)
+    readyAudio()
+    expect(first.disabled).toBe(false)
+  }
+  fireEvent.emptied(player)
+  expect(first.disabled).toBe(true)
+  expect(speed.disabled).toBe(true)
 })

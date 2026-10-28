@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
 
+from pydantic import BaseModel, Field, field_validator, model_validator
+
 from app.audio import AudioError, run_tool
 from app.config import Settings
 
@@ -13,10 +15,29 @@ Model = Literal["small", "medium"]
 Engine = Literal["mock", "whisper"]
 
 
+class Segment(BaseModel):
+    text: str = Field(strict=True)
+    start: float = Field(strict=True, ge=0, allow_inf_nan=False)
+    end: float = Field(strict=True, ge=0, allow_inf_nan=False)
+
+    @field_validator('text')
+    @classmethod
+    def nonempty_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError('Segment text must not be blank')
+        return value
+
+    @model_validator(mode='after')
+    def positive_interval(self):
+        if self.end <= self.start:
+            raise ValueError('Segment end must follow start')
+        return self
+
+
 @dataclass
 class Transcription:
     text: str
-    segments: list[dict]
+    segments: list[Segment]
 
 
 class Transcriber(Protocol):
@@ -52,28 +73,38 @@ def read_transcription(path: Path) -> Transcription:
         if not isinstance(data, dict) or not isinstance(data.get('transcription'), list):
             raise ValueError
         segments = []
+        texts = []
         for segment in data['transcription']:
             if not isinstance(segment, dict) or not isinstance(segment.get('text'), str):
                 raise ValueError
             segment['text'].encode('utf-8')
-            saved = {'text': segment['text']}
-            for key in ('offsets', 'timestamps'):
-                if key not in segment:
-                    continue
+            texts.append(segment['text'])
+            # Missing/bad timing must not discard otherwise usable transcript text.
+            key = 'offsets' if 'offsets' in segment else 'timestamps'
+            try:
                 times = segment[key]
                 if not isinstance(times, dict) or not {'from', 'to'} <= times.keys():
                     raise ValueError
                 start, end = times['from'], times['to']
                 if key == 'offsets':
-                    if type(start) is not int or type(end) is not int or not 0 <= start <= end:
+                    if type(start) is not int or type(end) is not int:
                         raise ValueError
-                elif any(not isinstance(t, str) or not re.fullmatch(r'\d{2,}:[0-5]\d:[0-5]\d[,.]\d{3}', t)
-                         for t in (start, end)):
-                    raise ValueError
-                saved[key] = {'from': start, 'to': end}
-            segments.append(saved)
+                    # whisper.cpp CLI JSON offsets are milliseconds (t0/t1 * 10),
+                    # not the library's 10 ms ticks: examples/cli/cli.cpp, times_o.
+                    start, end = start / 1000, end / 1000
+                else:
+                    converted = []
+                    for timestamp in (start, end):
+                        if not isinstance(timestamp, str) or not re.fullmatch(r'\d{2,}:[0-5]\d:[0-5]\d[,.]\d{3}', timestamp):
+                            raise ValueError
+                        hours, minutes, seconds, milliseconds = map(int, re.split(r'[:,.]', timestamp))
+                        converted.append(hours * 3600 + minutes * 60 + seconds + milliseconds / 1000)
+                    start, end = converted
+                segments.append(Segment(text=segment['text'], start=start, end=end))
+            except (KeyError, TypeError, ValueError, OverflowError):
+                continue
         # Concatenate verbatim: spaces, punctuation and line breaks belong to the model.
-        return Transcription(''.join(segment['text'] for segment in segments), segments)
+        return Transcription(''.join(texts), segments)
     except (OSError, ValueError, TypeError, UnicodeError, RecursionError):
         raise TranscriptionError('Saída inválida do transcritor.') from None
 
